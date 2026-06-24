@@ -13,12 +13,20 @@ authors = [{ name = "Niklas Griessbaum" }]
 keywords = ["snow", "remote sensing", "xarray", "background reflectance"]
 dependencies = [
     "spires-contract",
+    "spires-io",
+    "numpy",
     "xarray",
+    "netCDF4",
     "rioxarray",
 ]
 
 [project.optional-dependencies]
-test = ["pytest"]
+zarr = ["zarr<3"]
+dask = ["dask"]
+tqdm = ["tqdm"]
+progress = ["tqdm"]
+all = ["zarr<3", "dask", "tqdm"]
+test = ["pytest", "zarr<3", "dask"]
 
 [project.urls]
 Homepage = "https://github.com/SPIReS-Organization/spires-r0"
