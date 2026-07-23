@@ -1,0 +1,40 @@
+name: Build and Test
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build + import smoke on Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.9', '3.10', '3.11', '3.12']
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history for setuptools-scm
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Build sdist + wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+
+      # Scaffolding package: no tests yet, and its family deps are not on PyPI.
+      # Install without deps so CI validates packaging + import. Replace with a
+      # full ".[test]" + pytest run once real code and tests land.
+      - name: Install (no deps) + import smoke test
+        run: |
+          pip install --no-deps dist/*.whl
+          python -c "import spires_r0; print('spires_r0', spires_r0.__version__)"
