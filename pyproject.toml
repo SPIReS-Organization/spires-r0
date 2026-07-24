@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=61.0", "wheel", "setuptools-scm"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "spires-r0"
-version = "0.1.0"
+dynamic = ["version"]  # version derived from git tags via setuptools_scm
 description = "SPIReS background (R_0) reflectance production"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.9"
@@ -38,3 +38,7 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+[tool.setuptools_scm]
+version_scheme = "post-release"
+local_scheme = "node-and-date"
