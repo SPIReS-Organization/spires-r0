@@ -16,7 +16,10 @@ from spires_r0.core import (
     reduce_prepared_scene_for_r0 as reduce_shared_prepared_scene_for_r0,
 )
 from spires_io.viirs.geospatial import copy_spatial_metadata
-from spires_io.viirs.hdf import parse_viirs_surface_reflectance_filename, prepare_viirs_scene_for_inversion
+from spires_io.viirs.load_surface_reflectance import (
+    parse_viirs_surface_reflectance_filename,
+    prepare_viirs_scene_for_inversion,
+)
 
 
 VIIRS_R0_NDVI_RED_BAND = "I1"

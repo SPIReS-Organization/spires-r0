@@ -8,7 +8,10 @@ from pathlib import Path
 import xarray as xr
 
 from spires_io.modis.geospatial import copy_spatial_metadata
-from spires_io.modis.hdf import parse_modis_surface_reflectance_filename, prepare_modis_scene_for_inversion
+from spires_io.modis.load_surface_reflectance import (
+    parse_modis_surface_reflectance_filename,
+    prepare_modis_scene_for_inversion,
+)
 from spires_r0.core import (
     build_r0 as build_shared_r0,
     build_r0_candidate_metrics as build_shared_r0_candidate_metrics,
