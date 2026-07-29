@@ -5,15 +5,20 @@ snow-free reference reflectance the inversion uses to unmix each scene.
 
 This package is part of the [SPIReS family](https://spires.readthedocs.io/).
 
-```{note}
-**Status: scaffolding.** `spires-r0` is an early scaffold — the public API is
-not implemented yet, so this site is a placeholder. It will grow an API
-reference (autodoc) as the background-reflectance code lands. Track progress in
-the [repository](https://github.com/SPIReS-Organization/spires-r0).
+## Implemented scope
+
+- Prepare explicit VIIRS and MODIS scene inventories through `spires-io`.
+- Build optional in-memory or Zarr-backed time stacks.
+- Select snow-free background spectra using the NDVI, NDSI,
+  blue-reflectance, and view-geometry rules migrated from SpiPy.
+- Record source time/index, observation count, rule choice, and geometry.
+- Validate and atomically write reusable NetCDF R0 artifacts.
+- Produce canonical float32 `(y, x, band)` background spectra that
+  `spires-io` loads directly into `SpiresData.background`.
+
+## API reference
+
+```{eval-rst}
+.. automodule:: spires_r0
+   :members:
 ```
-
-## Planned scope
-
-- Produce background (R₀, snow-free) reflectance against the spectra / r0
-  contract boundary.
-- Consume `spires-io`-loaded scenes; feed `spires-inversion`.

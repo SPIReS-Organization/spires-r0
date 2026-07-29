@@ -2,6 +2,15 @@ import numpy as np
 import pytest
 import xarray as xr
 
+from spires_contract import SpiresData, validate_for_inversion
+from spires_io import load_background_reflectance
+from spires_r0.core import (
+    R0_BUILD_SIGNATURE_ATTR,
+    R0_COMPLETION_STATUS_ATTR,
+    R0_PRODUCT_TYPE_ATTR,
+    R0_SCHEMA_VERSION_ATTR,
+    R0_SOURCE_INVENTORY_DIGEST_ATTR,
+)
 from spires_r0.viirs import (
     build_viirs_r0,
     build_viirs_r0_candidate_metrics,
@@ -169,21 +178,52 @@ def test_reduce_viirs_prepared_scene_for_r0_keeps_required_variables():
 
 def test_build_viirs_r0_from_sources_writes_and_reuses_existing_file(tmp_path):
     r0_path = tmp_path / "snpp_r0.nc"
-    scene = build_mock_prepared_scene("2026-06-01", np.full((2, 7), 0.2, dtype=np.float32))
-    scene.attrs["processing_timestamp"] = "2026160123456"
-    scene.attrs["lut_file"] = "/tmp/lut_viirs.mat"
+    scene_1 = build_mock_prepared_scene("2026-06-01", np.full((2, 7), 0.2, dtype=np.float32))
+    scene_2 = build_mock_prepared_scene("2026-07-01", np.full((2, 7), 0.3, dtype=np.float32))
+    scene_1.attrs["processing_timestamp"] = "2026160123456"
+    scene_1.attrs["lut_file"] = "/tmp/lut_viirs.mat"
+    timeseries = build_viirs_timeseries([scene_1, scene_2])
 
-    original = build_viirs_r0_from_sources([scene], r0_path=r0_path)
-    loaded = build_viirs_r0_from_sources([], r0_path=r0_path)
+    original = build_viirs_r0_from_sources([timeseries], r0_path=r0_path)
+    loaded = build_viirs_r0_from_sources([timeseries], r0_path=r0_path)
+    np.testing.assert_allclose(
+        original["r0_reflectance"].values,
+        loaded["r0_reflectance"].values,
+    )
+    assert loaded.attrs[R0_BUILD_SIGNATURE_ATTR] == original.attrs[R0_BUILD_SIGNATURE_ATTR]
+    loaded.close()
+
+    rebuilt = build_viirs_r0_from_sources(
+        [timeseries],
+        r0_path=r0_path,
+        ndvi_tie_epsilon=0.01,
+    )
+    background = load_background_reflectance(r0_path, target_scene=scene_1)
+    validate_for_inversion(SpiresData(scene=scene_1, background=background))
 
     assert r0_path.exists()
     assert "acquisition_date" not in original.attrs
     assert "processing_timestamp" not in original.attrs
     assert "lut_file" not in original.attrs
-    np.testing.assert_allclose(original["r0_reflectance"].values, loaded["r0_reflectance"].values)
+    assert original.attrs[R0_PRODUCT_TYPE_ATTR] == "SPIReS_R0"
+    assert original.attrs[R0_SCHEMA_VERSION_ATTR] == 1
+    assert original.attrs[R0_COMPLETION_STATUS_ATTR] == "complete"
+    assert len(original.attrs[R0_SOURCE_INVENTORY_DIGEST_ATTR]) == 64
+    assert len(original.attrs[R0_BUILD_SIGNATURE_ATTR]) == 64
+    assert original.attrs["r0_source_scene_count"] == 2
+    assert (
+        rebuilt.attrs[R0_SOURCE_INVENTORY_DIGEST_ATTR]
+        == original.attrs[R0_SOURCE_INVENTORY_DIGEST_ATTR]
+    )
+    assert (
+        rebuilt.attrs[R0_BUILD_SIGNATURE_ATTR]
+        != original.attrs[R0_BUILD_SIGNATURE_ATTR]
+    )
+    assert background.name == "background_reflectance"
+    assert background.dtype == np.dtype(np.float32)
 
 
-def test_build_viirs_r0_accepts_chunked_timeseries():
+def test_build_viirs_r0_accepts_chunked_timeseries(tmp_path):
     da = pytest.importorskip("dask.array")
 
     scene_1 = build_mock_prepared_scene("2026-06-01", np.array([[0.2, 0.3, 0.1, 0.30, 0.5, 0.4, 0.4], [0.2, 0.6, 0.4, 0.40, 0.2, 0.3, 0.3]], dtype=np.float32))
@@ -196,7 +236,12 @@ def test_build_viirs_r0_accepts_chunked_timeseries():
         coords=timeseries["reflectance"].coords,
     )
 
-    r0 = build_viirs_r0(chunked)
+    staged = build_viirs_timeseries(
+        [chunked],
+        zarr_path=tmp_path / "prepared.zarr",
+        chunks={"time": 1},
+    )
+    r0 = build_viirs_r0(staged)
 
     assert r0["r0_source_index"].isel(y=0, x=0).compute().item() == 1
     assert r0["r0_source_index"].isel(y=0, x=1).compute().item() == 0
