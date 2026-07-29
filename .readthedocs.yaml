@@ -20,7 +20,8 @@ build:
       # Full git history for setuptools_scm version detection.
       - git fetch --unshallow || true
 
-# Narrative-only scaffold: no autodoc, so the package is not installed.
 python:
   install:
     - requirements: doc/requirements.txt
+    - method: pip
+      path: .

@@ -24,10 +24,9 @@ except Exception:
 version = release
 
 # -- General configuration ---------------------------------------------------
-# This package is scaffolding; the docs are narrative-only (no autodoc yet).
-
 extensions = [
     "myst_parser",             # Markdown
+    "sphinx.ext.autodoc",      # public Python API
     "sphinx.ext.intersphinx",  # cross-link to the rest of the family
     "sphinx_markdown_tables",
 ]

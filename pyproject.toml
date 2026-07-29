@@ -7,18 +7,26 @@ name = "spires-r0"
 dynamic = ["version"]  # version derived from git tags via setuptools_scm
 description = "SPIReS background (R_0) reflectance production"
 readme = { file = "README.md", content-type = "text/markdown" }
-requires-python = ">=3.9"
-license = { text = "MIT" }
+requires-python = ">=3.10"
+license = "MIT"
 authors = [{ name = "Niklas Griessbaum" }]
 keywords = ["snow", "remote sensing", "xarray", "background reflectance"]
 dependencies = [
-    "spires-contract",
+    "spires-contract @ git+https://github.com/SPIReS-Organization/spires-contract.git@main",
+    "spires-io @ git+https://github.com/SPIReS-Organization/spires-io.git@main",
+    "numpy",
     "xarray",
+    "netCDF4",
     "rioxarray",
 ]
 
 [project.optional-dependencies]
-test = ["pytest"]
+zarr = ["zarr<3"]
+dask = ["dask"]
+tqdm = ["tqdm"]
+progress = ["tqdm"]
+all = ["zarr<3", "dask", "tqdm"]
+test = ["pytest", "zarr<3", "dask"]
 
 [project.urls]
 Homepage = "https://github.com/SPIReS-Organization/spires-r0"
