@@ -141,6 +141,7 @@ def build_viirs_timeseries(
     **prepare_kwargs,
 ) -> xr.Dataset:
     """Prepare and concatenate VIIRS scenes into a time stack for R0 workflows."""
+    prepare_kwargs.setdefault("keep_r0_masks", True)
     return build_shared_timeseries(
         sources,
         lut_file=lut_file,
@@ -184,6 +185,7 @@ def build_viirs_r0_from_sources(
     **prepare_kwargs,
 ) -> xr.Dataset:
     """Build a VIIRS R0 composite from raw or prepared input scenes."""
+    prepare_kwargs.setdefault("keep_r0_masks", True)
     return build_shared_r0_from_sources(
         sources,
         r0_path=r0_path,
