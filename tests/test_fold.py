@@ -31,7 +31,6 @@ def test_metrics_match_ross_definitions(rng):
     np.testing.assert_allclose(m["candidate_water_blue"], ref["candidate_water_blue_metric"].values, equal_nan=True)
 
 
-@pytest.mark.xfail(strict=True, reason="raster.py lands in Task 5")
 def test_raster_policy_candidate_filters():
     from tests.conftest import make_raster_scene
     from spires_r0.raster import prepare_raster_scene_for_r0
@@ -44,7 +43,6 @@ def test_raster_policy_candidate_filters():
     assert np.isnan(bluish["candidate_ndvi"]).all()
 
 
-@pytest.mark.xfail(strict=True, reason="raster.py lands in Task 5")
 def test_missing_role_band_raises():
     from tests.conftest import make_raster_scene
     from spires_r0.raster import prepare_raster_scene_for_r0
