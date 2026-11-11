@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import os
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 import uuid
@@ -18,7 +19,9 @@ from spires_contract import ContractError
 from spires_contract.spectra import validate_background_spectra
 from spires_io.logging_utils import log_event
 
+from spires_r0.fold import MODIS_POLICY, R0Composite, R0Policy, policy_from_legacy_kwargs
 from spires_r0.io import sanitize_netcdf_dataset
+from spires_r0.prefetch import one_ahead
 
 
 LOGGER = logging.getLogger(__name__)
@@ -189,12 +192,6 @@ def safe_normalized_difference(numerator: xr.DataArray, denominator: xr.DataArra
     total = numerator + denominator
     safe_total = total.where(total != 0)
     return (numerator - denominator) / safe_total
-
-
-def scalar_dataarray_to_float(value: xr.DataArray) -> float:
-    if hasattr(value.data, "compute"):
-        value = value.compute()
-    return float(value.item())
 
 
 def scalar_dataarray_to_value(value: xr.DataArray):
@@ -563,66 +560,65 @@ def build_r0_candidate_metrics(
     )
 
 
-def select_time_indices(metric: xr.DataArray, *, mode: str) -> tuple[xr.DataArray, xr.DataArray]:
-    metric = xr.DataArray(
-        metric.data,
-        dims=metric.dims,
-        coords={dim: metric.coords[dim] for dim in metric.dims},
-        name=metric.name,
+def _legacy_r0_policy(params: dict, tiebreak_depth: int | None = None) -> R0Policy:
+    """Policy for the legacy build_r0 keyword set. MODIS_POLICY only supplies use_sensor_geometry;
+    band labels and thresholds come from params."""
+    return replace(policy_from_legacy_kwargs(MODIS_POLICY, tiebreak_depth=tiebreak_depth, **params), name="core_legacy")
+
+
+def _finalize_composite(composite: R0Composite) -> xr.Dataset:
+    """Finalize a composite into the SPIReS_R0 product. The per-pixel overflow flag is not a schema v1
+    variable, so it is dropped; its pixel count survives as the r0_tiebreak_window_overflow_pixels attr."""
+    return composite.finalize().drop_vars("r0_tiebreak_window_overflow")
+
+
+def _r0_product_attrs(time_values: np.ndarray, *, n_scenes: int, params: dict) -> dict:
+    return {
+        R0_PRODUCT_TYPE_ATTR: R0_PRODUCT_TYPE,
+        R0_SCHEMA_VERSION_ATTR: R0_SCHEMA_VERSION,
+        R0_COMPLETION_STATUS_ATTR: R0_COMPLETION_STATUS,
+        "time_coverage_start": str(time_values.min())[:10],
+        "time_coverage_end": str(time_values.max())[:10],
+        "r0_algorithm": "ndvi_ndsi_blue_composite",
+        "r0_source_scene_count": int(n_scenes),
+        "r0_max_sensor_zenith": float(params["max_sensor_zenith"]),
+        "r0_ndvi_tie_epsilon": float(params["ndvi_tie_epsilon"]),
+        "r0_ndvi_red_band": str(params["ndvi_red_band"]),
+        "r0_ndvi_nir_band": str(params["ndvi_nir_band"]),
+        "r0_ndsi_visible_band": str(params["ndsi_visible_band"]),
+        "r0_ndsi_swir_band": str(params["ndsi_swir_band"]),
+        "r0_blue_band": str(params["blue_band"]),
+        "r0_min_blue_reflectance": float(params["min_blue_reflectance"]),
+    }
+
+
+def _log_r0_build_summary(
+    logger: logging.Logger,
+    event_name: str,
+    result: xr.Dataset,
+    *,
+    time_values: np.ndarray,
+    time_count: int,
+    selected_bands: list,
+    ndvi_tie_epsilon: float,
+) -> None:
+    log_event(
+        logger,
+        event_name,
+        stage="r0",
+        event_type="summary",
+        time_count=time_count,
+        time_coverage_start=str(time_values.min())[:10],
+        time_coverage_end=str(time_values.max())[:10],
+        selected_bands=selected_bands,
+        output_shape=list(result["r0_reflectance"].shape),
+        ndvi_tie_epsilon=ndvi_tie_epsilon,
+        used_min_blue_fraction=round(float(result["r0_used_min_blue_rule"].mean()), 6),
+        used_water_blue_fraction=round(float(result["r0_used_water_blue_rule"].mean()), 6),
+        valid_source_fraction=round(float((result["r0_source_index"] >= 0).mean()), 6),
+        mean_r0_count=round(float(result["r0_count"].mean()), 6),
+        tiebreak_window_overflow_pixels=int(result.attrs["r0_tiebreak_window_overflow_pixels"]),
     )
-    invalid = metric.isnull().all(dim="time")
-
-    if mode == "max":
-        filled = metric.fillna(-np.inf)
-        index = filled.argmax(dim="time")
-    elif mode == "min":
-        filled = metric.fillna(np.inf)
-        index = filled.argmin(dim="time")
-    else:
-        raise ValueError(f"Unsupported mode: {mode}")
-
-    index = index.where(~invalid, other=-1).astype(np.int32)
-    return index, invalid
-
-
-def build_view_geometry_tiebreak_metric(
-    sensor_zenith: xr.DataArray,
-    sensor_azimuth: xr.DataArray,
-) -> xr.DataArray:
-    """Build a stable near-nadir tie-break metric with directional components as secondary keys."""
-    azimuth_radians = np.deg2rad(sensor_azimuth)
-    view_x = np.sin(np.deg2rad(sensor_zenith)) * np.cos(azimuth_radians)
-    view_y = np.sin(np.deg2rad(sensor_zenith)) * np.sin(azimuth_radians)
-    return (
-        sensor_zenith.astype(np.float32)
-        + np.abs(view_x).astype(np.float32) * np.float32(1.0e-3)
-        + np.abs(view_y).astype(np.float32) * np.float32(1.0e-6)
-    ).rename("view_geometry_tiebreak_metric")
-
-
-def gather_values_by_index(
-    values: xr.DataArray,
-    source_index: xr.DataArray,
-    invalid_mask: xr.DataArray,
-) -> xr.DataArray:
-    source_index = xr.DataArray(
-        source_index.data,
-        dims=source_index.dims,
-        coords={dim: source_index.coords[dim] for dim in source_index.dims},
-    )
-    invalid_mask = xr.DataArray(
-        invalid_mask.data,
-        dims=invalid_mask.dims,
-        coords={dim: invalid_mask.coords[dim] for dim in invalid_mask.dims},
-    )
-
-    if hasattr(source_index.data, "compute"):
-        source_index = source_index.compute()
-    if hasattr(invalid_mask.data, "compute"):
-        invalid_mask = invalid_mask.compute()
-
-    safe_index = source_index.where(~invalid_mask, other=0)
-    return values.isel(time=safe_index).where(~invalid_mask)
 
 
 def build_r0(
@@ -639,77 +635,13 @@ def build_r0(
     blue_band: str,
     min_blue_reflectance: float,
     copy_spatial_metadata_fn: CopySpatialMetadataFn,
+    tiebreak_depth: int | None = None,
 ) -> xr.Dataset:
+    """Reduce a time-stacked cube by folding its slices through R0Composite, one slice at a time."""
     if "time" not in prepared_timeseries.dims:
         raise ValueError("prepared_timeseries must have a 'time' dimension")
     logger = logger or LOGGER
-
-    candidate_ds = build_r0_candidate_metrics(
-        prepared_timeseries,
-        max_sensor_zenith=max_sensor_zenith,
-        ndvi_red_band=ndvi_red_band,
-        ndvi_nir_band=ndvi_nir_band,
-        ndsi_visible_band=ndsi_visible_band,
-        ndsi_swir_band=ndsi_swir_band,
-        blue_band=blue_band,
-        min_blue_reflectance=min_blue_reflectance,
-    )
-
-    ndsi = candidate_ds["ndsi"]
-    candidate_ndvi = candidate_ds["candidate_ndvi"]
-    candidate_blue_metric = candidate_ds["candidate_blue_metric"]
-    candidate_water_blue_metric = candidate_ds["candidate_water_blue_metric"]
-    has_negative_ndsi = candidate_ds["has_negative_ndsi"]
-    sensor_zenith = prepared_timeseries["sensor_zenith"]
-    sensor_azimuth = prepared_timeseries["sensor_azimuth"]
-    solar_zenith = prepared_timeseries["solar_zenith"]
-    solar_azimuth = prepared_timeseries["solar_azimuth"]
-    ndvi_near_max_threshold = candidate_ndvi.max(dim="time", skipna=True) - np.float32(ndvi_tie_epsilon)
-    near_max_ndvi_mask = candidate_ndvi >= ndvi_near_max_threshold
-    view_geometry_tiebreak_metric = build_view_geometry_tiebreak_metric(sensor_zenith, sensor_azimuth)
-    candidate_ndvi_tiebreak_metric = view_geometry_tiebreak_metric.where(near_max_ndvi_mask)
-
-    idx_max_ndvi, invalid_ndvi = select_time_indices(candidate_ndvi_tiebreak_metric, mode="min")
-    idx_min_blue, invalid_blue = select_time_indices(candidate_blue_metric, mode="min")
-    idx_min_water_blue, invalid_water_blue = select_time_indices(candidate_water_blue_metric, mode="min")
-
-    min_ndsi = ndsi.min(dim="time", skipna=True)
-    max_ndvi = candidate_ndvi.max(dim="time", skipna=True)
-    min_blue = candidate_blue_metric.min(dim="time", skipna=True)
-    min_water_blue = candidate_water_blue_metric.min(dim="time", skipna=True)
-
-    use_max_ndvi = has_negative_ndsi.fillna(False).astype(bool) & (~invalid_ndvi)
-    use_min_blue = (~use_max_ndvi) & (~invalid_blue)
-    use_min_water_blue = (~use_max_ndvi) & invalid_blue & (~invalid_water_blue)
-    invalid_final = ~(use_max_ndvi | use_min_blue | use_min_water_blue)
-
-    source_index = xr.where(
-        use_max_ndvi,
-        idx_max_ndvi,
-        xr.where(use_min_blue, idx_min_blue, idx_min_water_blue),
-    ).where(~invalid_final, other=-1).astype(np.int32)
-
-    reflectance = prepared_timeseries["reflectance"]
-    r0_values = gather_values_by_index(reflectance, source_index, invalid_final).astype(np.float32)
-    r0_sensor_zenith = gather_values_by_index(sensor_zenith, source_index, invalid_final).astype(np.float32)
-    r0_sensor_azimuth = gather_values_by_index(sensor_azimuth, source_index, invalid_final).astype(np.float32)
-    r0_solar_zenith = gather_values_by_index(solar_zenith, source_index, invalid_final).astype(np.float32)
-    r0_solar_azimuth = gather_values_by_index(solar_azimuth, source_index, invalid_final).astype(np.float32)
-
-    safe_source_index = xr.DataArray(
-        source_index.data,
-        dims=source_index.dims,
-        coords={dim: source_index.coords[dim] for dim in source_index.dims},
-    )
-    if hasattr(safe_source_index.data, "compute"):
-        safe_source_index = safe_source_index.compute()
-    safe_source_index = safe_source_index.where(safe_source_index >= 0, other=0)
-    source_time = prepared_timeseries["time"].isel(time=safe_source_index).where(source_index >= 0)
-
-    valid_count = prepared_timeseries["valid_r0_mask"].sum(dim="time").astype(np.int32)
-    time_values = prepared_timeseries["time"].values
-    prepared_source_digest = source_inventory_digest([prepared_timeseries])
-    algorithm_parameters = {
+    params = {
         "max_sensor_zenith": max_sensor_zenith,
         "ndvi_tie_epsilon": ndvi_tie_epsilon,
         "ndvi_red_band": ndvi_red_band,
@@ -719,105 +651,48 @@ def build_r0(
         "blue_band": blue_band,
         "min_blue_reflectance": min_blue_reflectance,
     }
-    prepared_build_signature = build_request_digest(
-        source_inventory_digest_value=prepared_source_digest,
+    composite = None
+    for t in range(int(prepared_timeseries.sizes["time"])):
+        scene = prepared_timeseries.isel(time=t)
+        if hasattr(scene["reflectance"].data, "compute"):  # dask-backed (zarr) cube: materialise one slice
+            scene = scene.compute()
+        if composite is None:
+            composite = R0Composite(scene, _legacy_r0_policy(params, tiebreak_depth))
+        composite.update(scene)
+    if composite is None:
+        raise ValueError("prepared_timeseries has no time slices")
+    result = _finalize_composite(composite)
+
+    time_values = prepared_timeseries["time"].values
+    source_digest = source_inventory_digest([prepared_timeseries])
+    build_signature = build_request_digest(
+        source_inventory_digest_value=source_digest,
         lut_file=None,
         adapter=event_name,
-        algorithm_parameters=algorithm_parameters,
+        algorithm_parameters=params,
         prepare_kwargs={},
     )
-    used_any_min_blue = use_min_blue | use_min_water_blue
-    used_min_blue_fraction = scalar_dataarray_to_float(used_any_min_blue.mean()) if used_any_min_blue.size else float("nan")
-    used_water_blue_fraction = scalar_dataarray_to_float(use_min_water_blue.mean()) if use_min_water_blue.size else float("nan")
-    valid_source = source_index >= 0
-    valid_source_fraction = scalar_dataarray_to_float(valid_source.mean()) if valid_source.size else float("nan")
-
-    result = xr.Dataset(
-        data_vars={
-            "r0_reflectance": xr.DataArray(
-                r0_values.data,
-                dims=("y", "x", "band"),
-                coords={"y": prepared_timeseries["y"].values, "x": prepared_timeseries["x"].values, "band": prepared_timeseries["band"].values},
-            ),
-            "r0_source_index": xr.DataArray(
-                source_index.data,
-                dims=("y", "x"),
-                coords={"y": prepared_timeseries["y"].values, "x": prepared_timeseries["x"].values},
-            ),
-            "r0_source_time": xr.DataArray(
-                source_time.data,
-                dims=("y", "x"),
-                coords={"y": prepared_timeseries["y"].values, "x": prepared_timeseries["x"].values},
-            ),
-            "r0_used_min_blue_rule": xr.DataArray(
-                used_any_min_blue.data,
-                dims=("y", "x"),
-                coords={"y": prepared_timeseries["y"].values, "x": prepared_timeseries["x"].values},
-            ),
-            "r0_used_water_blue_rule": xr.DataArray(
-                use_min_water_blue.data,
-                dims=("y", "x"),
-                coords={"y": prepared_timeseries["y"].values, "x": prepared_timeseries["x"].values},
-            ),
-            "r0_count": valid_count.astype(np.int32),
-            "r0_sensor_zenith": r0_sensor_zenith,
-            "r0_sensor_azimuth": r0_sensor_azimuth,
-            "r0_solar_zenith": r0_solar_zenith,
-            "r0_solar_azimuth": r0_solar_azimuth,
-            "max_ndvi": max_ndvi,
-            "min_ndsi": min_ndsi,
-            "min_blue_metric": min_blue,
-            "min_water_blue_metric": min_water_blue,
-            "has_negative_ndsi": has_negative_ndsi,
-        },
-        attrs=prepared_timeseries.attrs.copy(),
-    )
+    result.attrs = {**prepared_timeseries.attrs, **result.attrs}
     result = copy_spatial_metadata_fn(prepared_timeseries, result)
-    result.attrs.update(
-        {
-            R0_PRODUCT_TYPE_ATTR: R0_PRODUCT_TYPE,
-            R0_SCHEMA_VERSION_ATTR: R0_SCHEMA_VERSION,
-            R0_COMPLETION_STATUS_ATTR: R0_COMPLETION_STATUS,
-            R0_SOURCE_INVENTORY_DIGEST_ATTR: prepared_source_digest,
-            R0_BUILD_SIGNATURE_ATTR: prepared_build_signature,
-            "time_coverage_start": str(time_values.min())[:10],
-            "time_coverage_end": str(time_values.max())[:10],
-            "r0_algorithm": "ndvi_ndsi_blue_composite",
-            "r0_source_scene_count": int(prepared_timeseries.sizes["time"]),
-            "r0_max_sensor_zenith": float(max_sensor_zenith),
-            "r0_ndvi_tie_epsilon": float(ndvi_tie_epsilon),
-            "r0_ndvi_red_band": str(ndvi_red_band),
-            "r0_ndvi_nir_band": str(ndvi_nir_band),
-            "r0_ndsi_visible_band": str(ndsi_visible_band),
-            "r0_ndsi_swir_band": str(ndsi_swir_band),
-            "r0_blue_band": str(blue_band),
-            "r0_min_blue_reflectance": float(min_blue_reflectance),
-        }
-    )
+    result.attrs.update(_r0_product_attrs(time_values, n_scenes=composite.n_scenes, params=params))
+    result.attrs[R0_SOURCE_INVENTORY_DIGEST_ATTR] = source_digest
+    result.attrs[R0_BUILD_SIGNATURE_ATTR] = build_signature
     result = sanitize_r0_dataset_attrs(result)
     validate_r0_dataset(
         result,
         expected_band_count=int(prepared_timeseries.sizes["band"]),
         max_scene_index=int(prepared_timeseries.sizes["time"]) - 1,
-        expected_source_inventory_digest=prepared_source_digest,
-        expected_build_signature=prepared_build_signature,
+        expected_source_inventory_digest=source_digest,
+        expected_build_signature=build_signature,
     )
-
-    log_event(
+    _log_r0_build_summary(
         logger,
         event_name,
-        stage="r0",
-        event_type="summary",
+        result,
+        time_values=time_values,
         time_count=int(prepared_timeseries.sizes["time"]),
-        time_coverage_start=str(time_values.min())[:10],
-        time_coverage_end=str(time_values.max())[:10],
         selected_bands=prepared_timeseries["band"].values.tolist(),
-        output_shape=list(result["r0_reflectance"].shape),
         ndvi_tie_epsilon=ndvi_tie_epsilon,
-        used_min_blue_fraction=round(used_min_blue_fraction, 6),
-        used_water_blue_fraction=round(used_water_blue_fraction, 6),
-        valid_source_fraction=round(valid_source_fraction, 6),
-        mean_r0_count=round(scalar_dataarray_to_float(valid_count.mean()), 6),
     )
     return result
 
@@ -1000,6 +875,120 @@ def build_timeseries(
     return timeseries
 
 
+def _stream_r0_from_sources(
+    sources: list[str | Path | xr.Dataset],
+    *,
+    lut_file: str | Path | None,
+    logger: logging.Logger,
+    show_progress: bool,
+    progress_desc: str,
+    max_sensor_zenith: float,
+    ndvi_tie_epsilon: float,
+    ndvi_red_band: str,
+    ndvi_nir_band: str,
+    ndsi_visible_band: str,
+    ndsi_swir_band: str,
+    blue_band: str,
+    min_blue_reflectance: float,
+    prepare_scene_fn: PrepareSceneFn,
+    reduce_scene_for_r0_fn: Callable[[xr.Dataset], xr.Dataset],
+    copy_spatial_metadata_fn: CopySpatialMetadataFn,
+    event_name: str,
+    prepare_kwargs: dict,
+    source_digest: str,
+    build_signature: str,
+) -> xr.Dataset:
+    """prepare -> reduce -> fold, one source at a time. No time stack is ever materialised.
+
+    Source handling mirrors build_timeseries: in-memory time stacks and prepared datasets are reused
+    as-is, anything else goes through prepare_scene_fn, and a slice without a time dim gets its time
+    from attrs['acquisition_date']. r0_source_index is emitted in time-sorted order (stable on ties),
+    the same indexing the zarr/cube path produces, by remapping the fold's feed-order indices.
+    """
+    if not sources:
+        raise ValueError("At least one scene is required to build a timeseries")
+    params = {
+        "max_sensor_zenith": max_sensor_zenith,
+        "ndvi_tie_epsilon": ndvi_tie_epsilon,
+        "ndvi_red_band": ndvi_red_band,
+        "ndvi_nir_band": ndvi_nir_band,
+        "ndsi_visible_band": ndsi_visible_band,
+        "ndsi_swir_band": ndsi_swir_band,
+        "blue_band": blue_band,
+        "min_blue_reflectance": min_blue_reflectance,
+    }
+
+    def load(source):
+        if isinstance(source, xr.Dataset) and ("time" in source.dims or "reflectance" in source.data_vars):
+            prepared = source
+        else:
+            prepared = prepare_scene_fn(source, lut_file=lut_file, logger=logger, **prepare_kwargs)
+        prepared = reduce_scene_for_r0_fn(prepared)
+        if "time" not in prepared.dims:
+            acquisition_date = prepared.attrs.get("acquisition_date")
+            if acquisition_date is None:
+                raise ValueError("Prepared scene is missing 'acquisition_date' in attrs")
+            prepared = prepared.expand_dims(time=[np.datetime64(acquisition_date)])
+        elif "time" not in prepared.coords:
+            raise ValueError("Prepared time-stack dataset is missing its 'time' coordinate")
+        if int(prepared.sizes["time"]) < 1:
+            raise ValueError("Prepared time-stack dataset contains no scenes")
+        return prepared
+
+    iterator = one_ahead(sources, load)
+    if show_progress:
+        try:
+            from tqdm.auto import tqdm
+        except ImportError as exc:
+            raise ImportError("show_progress=True requires tqdm to be installed") from exc
+        iterator = tqdm(iterator, total=len(sources), desc=progress_desc)
+
+    policy = _legacy_r0_policy(params)
+    composite = first = None
+    scene_times: list = []
+    for _, prepared in iterator:
+        if hasattr(prepared["reflectance"].data, "compute"):
+            prepared = prepared.compute()  # materialise one source, never a stack
+        if first is None:
+            first = prepared
+            composite = R0Composite(prepared.isel(time=0), policy)
+        for t in range(int(prepared.sizes["time"])):
+            scene = prepared.isel(time=t)
+            composite.update(scene)
+            scene_times.append(np.asarray(scene["time"].values).reshape(-1)[0])
+
+    times = np.array(scene_times)
+    sorted_position = np.empty(times.size, np.int32)
+    sorted_position[np.argsort(times, kind="stable")] = np.arange(times.size, dtype=np.int32)
+    result = _finalize_composite(composite)
+    feed_index = result["r0_source_index"].values
+    sorted_index = np.where(feed_index >= 0, sorted_position[np.maximum(feed_index, 0)], -1).astype(np.int32)
+    result = result.assign(r0_source_index=(("y", "x"), sorted_index))
+
+    result.attrs = {**first.attrs, **result.attrs}
+    result = copy_spatial_metadata_fn(first, result)
+    result.attrs.update(_r0_product_attrs(times, n_scenes=composite.n_scenes, params=params))
+    result.attrs[R0_SOURCE_INVENTORY_DIGEST_ATTR] = source_digest
+    result.attrs[R0_BUILD_SIGNATURE_ATTR] = build_signature
+    result = sanitize_r0_dataset_attrs(result)
+    validate_r0_dataset(
+        result,
+        max_scene_index=int(times.size) - 1,
+        expected_source_inventory_digest=source_digest,
+        expected_build_signature=build_signature,
+    )
+    _log_r0_build_summary(
+        logger,
+        event_name,
+        result,
+        time_values=times,
+        time_count=int(times.size),
+        selected_bands=result["band"].values.tolist(),
+        ndvi_tie_epsilon=ndvi_tie_epsilon,
+    )
+    return result
+
+
 def build_r0_from_sources(
     sources: list[str | Path | xr.Dataset],
     *,
@@ -1034,6 +1023,7 @@ def build_r0_from_sources(
 ) -> xr.Dataset:
     logger = logger or LOGGER
     resolved_r0_path = Path(r0_path).expanduser().resolve() if r0_path is not None else None
+    sources = list(sources)
     source_scene_count = sum(
         int(source.sizes["time"])
         if isinstance(source, xr.Dataset) and "time" in source.dims
@@ -1110,45 +1100,68 @@ def build_r0_from_sources(
         r0_path=str(resolved_r0_path) if resolved_r0_path is not None else None,
     )
 
-    timeseries = build_timeseries(
-        sources,
-        lut_file=lut_file,
-        logger=logger,
-        show_progress=show_progress,
-        progress_desc=progress_desc,
-        keep_variables="r0",
-        zarr_path=zarr_path,
-        zarr_mode=zarr_mode,
-        chunks=chunks,
-        parse_filename_fn=parse_filename_fn,
-        prepare_scene_fn=prepare_scene_fn,
-        reduce_scene_for_r0_fn=reduce_scene_for_r0_fn,
-        start_event_name=timeseries_start_event_name,
-        scene_event_name=timeseries_scene_event_name,
-        summary_event_name=timeseries_summary_event_name,
-        **prepare_kwargs,
-    )
-    result = build_r0(
-        timeseries,
-        logger=logger,
-        event_name=r0_build_event_name,
-        max_sensor_zenith=max_sensor_zenith,
-        ndvi_tie_epsilon=ndvi_tie_epsilon,
-        ndvi_red_band=ndvi_red_band,
-        ndvi_nir_band=ndvi_nir_band,
-        ndsi_visible_band=ndsi_visible_band,
-        ndsi_swir_band=ndsi_swir_band,
-        blue_band=blue_band,
-        min_blue_reflectance=min_blue_reflectance,
-        copy_spatial_metadata_fn=copy_spatial_metadata_fn,
-    )
+    if zarr_path is not None:
+        timeseries = build_timeseries(
+            sources,
+            lut_file=lut_file,
+            logger=logger,
+            show_progress=show_progress,
+            progress_desc=progress_desc,
+            keep_variables="r0",
+            zarr_path=zarr_path,
+            zarr_mode=zarr_mode,
+            chunks=chunks,
+            parse_filename_fn=parse_filename_fn,
+            prepare_scene_fn=prepare_scene_fn,
+            reduce_scene_for_r0_fn=reduce_scene_for_r0_fn,
+            start_event_name=timeseries_start_event_name,
+            scene_event_name=timeseries_scene_event_name,
+            summary_event_name=timeseries_summary_event_name,
+            **prepare_kwargs,
+        )
+        result = build_r0(
+            timeseries,
+            logger=logger,
+            event_name=r0_build_event_name,
+            max_sensor_zenith=max_sensor_zenith,
+            ndvi_tie_epsilon=ndvi_tie_epsilon,
+            ndvi_red_band=ndvi_red_band,
+            ndvi_nir_band=ndvi_nir_band,
+            ndsi_visible_band=ndsi_visible_band,
+            ndsi_swir_band=ndsi_swir_band,
+            blue_band=blue_band,
+            min_blue_reflectance=min_blue_reflectance,
+            copy_spatial_metadata_fn=copy_spatial_metadata_fn,
+        )
+        # The product no longer depends on the zarr-backed stack once build_r0 has returned.
+        del timeseries
+    else:
+        result = _stream_r0_from_sources(
+            sources,
+            lut_file=lut_file,
+            logger=logger,
+            show_progress=show_progress,
+            progress_desc=progress_desc,
+            max_sensor_zenith=max_sensor_zenith,
+            ndvi_tie_epsilon=ndvi_tie_epsilon,
+            ndvi_red_band=ndvi_red_band,
+            ndvi_nir_band=ndvi_nir_band,
+            ndsi_visible_band=ndsi_visible_band,
+            ndsi_swir_band=ndsi_swir_band,
+            blue_band=blue_band,
+            min_blue_reflectance=min_blue_reflectance,
+            prepare_scene_fn=prepare_scene_fn,
+            reduce_scene_for_r0_fn=reduce_scene_for_r0_fn,
+            copy_spatial_metadata_fn=copy_spatial_metadata_fn,
+            event_name=r0_build_event_name,
+            prepare_kwargs=prepare_kwargs,
+            source_digest=requested_source_digest,
+            build_signature=requested_build_signature,
+        )
     if requested_source_digest is not None:
         result.attrs[R0_SOURCE_INVENTORY_DIGEST_ATTR] = requested_source_digest
     if requested_build_signature is not None:
         result.attrs[R0_BUILD_SIGNATURE_ATTR] = requested_build_signature
-    # The output product no longer depends on the full source stack after the
-    # summary attrs are copied, so drop it before final serialization.
-    del timeseries
     gc.collect()
 
     if resolved_r0_path is not None:

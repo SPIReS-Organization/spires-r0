@@ -63,3 +63,41 @@ def test_build_modis_r0_uses_min_blue_when_ndsi_stays_positive():
 
     assert bool((r0["r0_source_index"] == 1).all())
     assert bool(r0["r0_used_min_blue_rule"].all())
+
+
+def _assert_r0_products_equal(a, b):
+    assert set(a.data_vars) == set(b.data_vars)
+    for v in ("r0_reflectance", "r0_source_index", "r0_source_time", "r0_count", "r0_used_min_blue_rule"):
+        x, y = a[v].values, b[v].values
+        if x.dtype.kind == "f":
+            np.testing.assert_array_equal(np.isnan(x), np.isnan(y), err_msg=v)
+            np.testing.assert_array_equal(x[~np.isnan(x)], y[~np.isnan(y)], err_msg=v)
+        else:
+            np.testing.assert_array_equal(x, y, err_msg=v)
+
+
+def test_build_modis_r0_from_sources_streaming_equals_zarr_cube(tmp_path, rng):
+    from tests.conftest import random_stack
+    from spires_r0.modis import build_modis_r0_from_sources
+
+    scenes = random_stack(rng, n_time=4)
+    streamed = build_modis_r0_from_sources(scenes, r0_path=tmp_path / "s.nc", overwrite=True)
+    cubed = build_modis_r0_from_sources(
+        scenes, r0_path=tmp_path / "c.nc", overwrite=True, zarr_path=tmp_path / "ts.zarr",
+    )
+    _assert_r0_products_equal(streamed, cubed)
+    assert streamed.attrs["r0_source_scene_count"] == 4
+
+
+def test_build_modis_r0_from_sources_streaming_equals_zarr_cube_shuffled(tmp_path, rng):
+    # The cube path sorts by time; the streaming path must remap its feed-order indices to the same order.
+    from tests.conftest import random_stack
+    from spires_r0.modis import build_modis_r0_from_sources
+
+    scenes = random_stack(rng, n_time=5)
+    shuffled = [scenes[i] for i in (3, 0, 4, 1, 2)]
+    streamed = build_modis_r0_from_sources(shuffled, r0_path=tmp_path / "s.nc", overwrite=True)
+    cubed = build_modis_r0_from_sources(
+        shuffled, r0_path=tmp_path / "c.nc", overwrite=True, zarr_path=tmp_path / "ts.zarr",
+    )
+    _assert_r0_products_equal(streamed, cubed)

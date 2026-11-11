@@ -97,3 +97,47 @@ def test_fold_is_feed_order_independent_shuffled_vs_sorted(seed, depth):
     b = _fold(by_time, policy)
     np.testing.assert_array_equal(a["r0_source_time"].values, b["r0_source_time"].values)
     np.testing.assert_array_equal(a["r0_reflectance"].values, b["r0_reflectance"].values)
+
+
+def test_core_build_r0_uses_fold_and_keeps_schema(rng):
+    from spires_r0.core import build_r0, validate_r0_dataset
+    scenes = random_stack(rng, n_time=5)
+    cube = xr.concat([s.expand_dims(time=[np.datetime64(s.attrs["acquisition_date"])]) for s in scenes], dim="time")
+    out = build_r0(cube, logger=None, event_name="test", max_sensor_zenith=30.0, ndvi_tie_epsilon=0.02,
+                   ndvi_red_band="1", ndvi_nir_band="2", ndsi_visible_band="4", ndsi_swir_band="6",
+                   blue_band="3", min_blue_reflectance=0.10, copy_spatial_metadata_fn=lambda s, d: d)
+    validate_r0_dataset(out, expected_band_count=7, max_scene_index=4,
+                        expected_source_inventory_digest=None, expected_build_signature=None)
+    assert out.attrs["r0_tiebreak_depth"] == 4
+    assert out.attrs["r0_source_scene_count"] == 5
+
+
+def test_core_build_r0_matches_reference(rng):
+    """build_r0's data variables must still equal the snapshot reducer (not just the fold)."""
+    from spires_r0.core import (
+        R0_COMPLETION_STATUS_ATTR, R0_PRODUCT_TYPE_ATTR, R0_SCHEMA_VERSION_ATTR,
+        build_r0,
+    )
+    scenes = random_stack(rng, n_time=5)
+    cube = xr.concat([s.expand_dims(time=[np.datetime64(s.attrs["acquisition_date"])]) for s in scenes], dim="time")
+    kw = dict(max_sensor_zenith=30.0, ndvi_tie_epsilon=0.02, ndvi_red_band="1", ndvi_nir_band="2",
+              ndsi_visible_band="4", ndsi_swir_band="6", blue_band="3", min_blue_reflectance=0.10,
+              copy_spatial_metadata_fn=_identity)
+    ref = reference_build_r0(cube, logger=None, event_name="ref", **kw)
+    got = build_r0(cube, logger=None, event_name="t", tiebreak_depth=5, **kw)
+    for v in COMPARE:
+        a, b = got[v].values, ref[v].values
+        assert a.dtype == b.dtype, v
+        if a.dtype.kind == "f":
+            np.testing.assert_array_equal(np.isnan(a), np.isnan(b), err_msg=v)
+            np.testing.assert_array_equal(a[~np.isnan(a)], b[~np.isnan(b)], err_msg=v)
+        elif a.dtype.kind == "M":
+            np.testing.assert_array_equal(np.isnat(a), np.isnat(b), err_msg=v)
+            np.testing.assert_array_equal(a[~np.isnat(a)].astype("datetime64[ns]"), b[~np.isnat(b)].astype("datetime64[ns]"), err_msg=v)
+        else:
+            np.testing.assert_array_equal(a, b, err_msg=v)
+    assert got.attrs[R0_PRODUCT_TYPE_ATTR] == "SPIReS_R0"
+    assert got.attrs[R0_SCHEMA_VERSION_ATTR] == 1
+    assert got.attrs[R0_COMPLETION_STATUS_ATTR] == "complete"
+    for k in ("time_coverage_start", "time_coverage_end", "r0_algorithm", "r0_source_scene_count", "r0_ndvi_tie_epsilon"):
+        assert k in got.attrs, k
