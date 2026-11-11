@@ -60,16 +60,28 @@ def _default_opener(sensor: str, platform: str | None, bands: list[str] | None) 
     return lambda d: adapter.open_surface_reflectance(d, **kwargs)
 
 
-def _align(scene: xr.Dataset, template: xr.Dataset) -> xr.Dataset:
-    """Reindex a scene onto the first scene's grid. Pixels with no counterpart become invalid."""
+def _align(scene: xr.Dataset, template: xr.Dataset, scene_id: str) -> xr.Dataset:
+    """Reindex a scene onto the first scene's grid. Pixels with no counterpart become invalid.
+
+    The reindex is nearest-neighbour within 0.1 px, so a sub-grid offset silently drops valid
+    pixels. Dropped pixels are logged; a scene that contributes no valid pixel at all is a
+    configuration error and raises.
+    """
     if scene.rio.crs != template.rio.crs:
         raise ValueError(f"scene CRS {scene.rio.crs} != template CRS {template.rio.crs}")
     if scene["y"].equals(template["y"]) and scene["x"].equals(template["x"]):
         return scene
     res = float(abs(template["x"].values[1] - template["x"].values[0])) if template["x"].size > 1 else 1.0
+    before = int(scene["valid_r0_mask"].values.sum())
     aligned = scene.drop_vars("spatial_ref", errors="ignore").reindex(
         y=template["y"].values, x=template["x"].values, method="nearest", tolerance=0.1 * res)
     aligned["valid_r0_mask"] = aligned["valid_r0_mask"].fillna(False).astype(bool)
+    after = int(aligned["valid_r0_mask"].values.sum())
+    if after < before:
+        log.warning("%s: %d of %d valid pixels fell outside the template grid and were dropped",
+                    scene_id, before - after, before)
+    if after == 0 and before > 0:
+        raise ValueError(f"{scene_id}: no valid pixel aligns with the template grid (offset > 0.1 px or different extent)")
     return aligned.rio.write_crs(template.rio.crs)
 
 
@@ -152,7 +164,7 @@ def build_raster_r0(
             template = scene
             composite = R0Composite(scene, policy)
         times.append(_scene_time(scene))
-        frac = composite.update(_align(scene, template))
+        frac = composite.update(_align(scene, template, d.name))
         logger.info("[%d/%d] %s: %.1f%% of pixels are snow-free candidates", i, len(dirs), d.name, 100 * frac)
 
     result = _finalize_composite(composite)
@@ -196,5 +208,8 @@ def build_raster_r0(
         expected_build_signature=signature,
     )
     if cache is not None:
-        cache.put(signature, r0_path, meta={"sensor": sensor, "platform": platform, "scene_ids": scene_ids})
+        try:
+            cache.put(signature, r0_path, meta={"sensor": sensor, "platform": platform, "scene_ids": scene_ids})
+        except Exception as exc:  # noqa: BLE001 - the product is already written; the cache is best-effort
+            logger.warning("R0 cache put failed for %s: %s", signature[:12], exc)
     return result

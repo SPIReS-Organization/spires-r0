@@ -68,6 +68,16 @@ def test_shifted_scene_is_reindexed_onto_first_grid(tmp_path):
                          open_scene=lambda d: {"A": a, "B": b}[d.name], prefetch=False)
     nir = ds["r0_reflectance"].sel(band="nir").values
     assert np.allclose(nir[:, 0], 0.40) and np.allclose(nir[:, 1:], 0.60)
+    assert ds["r0_reflectance"].dtype == np.float32
+
+
+def test_half_pixel_offset_scene_raises_no_pixel_aligns(tmp_path):
+    dirs = _dirs(tmp_path, ["A", "B"])
+    a = make_raster_scene(SNOWFREE, nx=3)
+    b = make_raster_scene({**SNOWFREE, "nir": 0.6}, nx=3, x0=300000.0 + 15.0)  # half a pixel: nothing within 0.1 px
+    with pytest.raises(ValueError, match="aligns"):
+        build_raster_r0(dirs, sensor="landsat", r0_path=tmp_path / "r0.nc",
+                        open_scene=lambda d: {"A": a, "B": b}[d.name], prefetch=False)
 
 
 def test_crs_mismatch_raises(tmp_path):

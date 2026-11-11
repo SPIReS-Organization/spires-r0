@@ -110,6 +110,7 @@ def test_core_build_r0_uses_fold_and_keeps_schema(rng):
                         expected_source_inventory_digest=None, expected_build_signature=None)
     assert out.attrs["r0_tiebreak_depth"] == 4
     assert out.attrs["r0_source_scene_count"] == 5
+    assert out.attrs["r0_policy"].startswith("legacy:")
 
 
 def test_core_build_r0_matches_reference(rng):

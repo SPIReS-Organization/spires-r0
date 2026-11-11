@@ -33,8 +33,12 @@ class R0Cache:
             dest = Path(dest)
             dest.parent.mkdir(parents=True, exist_ok=True)
             tmp = dest.parent / f".{dest.name}.{uuid.uuid4().hex}.tmp"
-            shutil.copyfile(src, tmp)
-            os.replace(tmp, dest)
+            try:
+                shutil.copyfile(src, tmp)
+                os.replace(tmp, dest)
+            except BaseException:
+                tmp.unlink(missing_ok=True)
+                raise
             return True
         except Exception as exc:  # noqa: BLE001 - a cache may save time, never fail a build
             log.warning("R0 cache miss for %s: %s", key, exc)
@@ -49,7 +53,13 @@ class R0Cache:
             (partial / META).write_text(json.dumps({"key": key, **meta}, indent=2, default=str))
             if final.exists():
                 shutil.rmtree(final)
-            os.rename(partial, final)
+            try:
+                os.rename(partial, final)
+            except OSError:
+                if not final.exists():
+                    raise
+                # A concurrent writer published the same key first. Its entry is the same build, so keep it.
+                shutil.rmtree(partial, ignore_errors=True)
         except Exception:
             shutil.rmtree(partial, ignore_errors=True)
             raise

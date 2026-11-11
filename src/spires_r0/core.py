@@ -194,6 +194,12 @@ def safe_normalized_difference(numerator: xr.DataArray, denominator: xr.DataArra
     return (numerator - denominator) / safe_total
 
 
+def scalar_dataarray_to_float(value: xr.DataArray) -> float:
+    if hasattr(value.data, "compute"):
+        value = value.compute()
+    return float(value.item())
+
+
 def scalar_dataarray_to_value(value: xr.DataArray):
     if hasattr(value.data, "compute"):
         value = value.compute()
@@ -560,10 +566,11 @@ def build_r0_candidate_metrics(
     )
 
 
-def _legacy_r0_policy(params: dict, tiebreak_depth: int | None = None) -> R0Policy:
+def _legacy_r0_policy(params: dict, event_name: str, tiebreak_depth: int | None = None) -> R0Policy:
     """Policy for the legacy build_r0 keyword set. MODIS_POLICY only supplies use_sensor_geometry;
-    band labels and thresholds come from params."""
-    return replace(policy_from_legacy_kwargs(MODIS_POLICY, tiebreak_depth=tiebreak_depth, **params), name="core_legacy")
+    band labels and thresholds come from params. The name is recorded in the product's r0_policy attr."""
+    return replace(policy_from_legacy_kwargs(MODIS_POLICY, tiebreak_depth=tiebreak_depth, **params),
+                   name=f"legacy:{event_name}")
 
 
 def _finalize_composite(composite: R0Composite) -> xr.Dataset:
@@ -657,7 +664,7 @@ def build_r0(
         if hasattr(scene["reflectance"].data, "compute"):  # dask-backed (zarr) cube: materialise one slice
             scene = scene.compute()
         if composite is None:
-            composite = R0Composite(scene, _legacy_r0_policy(params, tiebreak_depth))
+            composite = R0Composite(scene, _legacy_r0_policy(params, event_name, tiebreak_depth))
         composite.update(scene)
     if composite is None:
         raise ValueError("prepared_timeseries has no time slices")
@@ -943,7 +950,7 @@ def _stream_r0_from_sources(
             raise ImportError("show_progress=True requires tqdm to be installed") from exc
         iterator = tqdm(iterator, total=len(sources), desc=progress_desc)
 
-    policy = _legacy_r0_policy(params)
+    policy = _legacy_r0_policy(params, event_name)
     composite = first = None
     scene_times: list = []
     for _, prepared in iterator:
