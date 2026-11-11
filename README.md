@@ -24,6 +24,21 @@ The source builders accept prepared `xarray.Dataset` scenes or raw paths that
 `spires-io` can prepare, then select an annual snow-free background using the
 same NDVI/NDSI/blue-reflectance rules migrated from the original SpiPy workflow.
 
+## One streaming engine for every sensor
+
+All R0 products — MODIS, VIIRS, Landsat 8/9, Sentinel-2, HLS L30/S30 — are built by the same
+per-scene fold (`spires_r0.fold.R0Composite`). Sensor differences live in an `R0Policy`:
+band roles, whether sensor geometry drives the 30° zenith cut and the near-nadir tie-break
+(MODIS/VIIRS: yes, ε = 0.02 NDVI window; Landsat/S2/HLS: no — ties go to the earliest
+acquisition, and `r0_sensor_zenith/azimuth` are NaN), and raster-only candidate filters
+(blue > 0.01, blue < green). Memory is ~(tiebreak_depth + 2) scenes regardless of stack length.
+
+- `build_modis_r0(...)`, `build_viirs_r0(...)`, `*_from_sources(...)`: unchanged signatures and
+  output schema; `*_from_sources` no longer materialises a time stack unless `zarr_path` is given.
+- `build_raster_r0(scene_dirs, sensor="hls_l30", r0_path=..., cache_root=...)`: Landsat/S2/HLS from
+  `spires_io`-materialised scene directories. Grid = first scene in sorted-name order.
+- `R0Cache`: keyed on the product's `spires_r0_build_signature_sha256`; hits are re-validated and copied.
+
 ## Scientific and file boundary
 
 The canonical inversion input is `r0_reflectance`, a float32
