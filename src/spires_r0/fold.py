@@ -178,8 +178,11 @@ class R0Composite:
     """Running per-pixel R0 state. Feed scenes in any order; call finalize() once.
 
     Keeps the top-K NDVI candidates per pixel (K = policy.tiebreak_depth) and single-slot
-    fallback minima. The primary pick is exact for every pixel whose
-    r0_tiebreak_window_overflow flag is False.
+    fallback minima. Top-K retention ranks by (NDVI desc, time asc, feed index asc), so which
+    candidates survive is independent of feed order.
+
+    r0_tiebreak_window_overflow is conservative: it is set wherever the result MAY differ from
+    the full-stack reducer, and it is never unset where the result does differ.
     """
 
     def __init__(self, template: xr.Dataset, policy: R0Policy):
@@ -210,17 +213,19 @@ class R0Composite:
         K = self.K
         ok = ~np.isnan(ndvi)
         ndvi_all = np.concatenate([self.c_ndvi, np.where(ok, ndvi, -np.inf).astype(np.float32)[None]], 0)
-        order = np.argsort(-ndvi_all, axis=0, kind="stable")
+        time_all = np.concatenate([self.c_time, np.where(ok, when, _NAT).astype(np.int64)[None]], 0)
+        idx_all = np.concatenate([self.c_idx, np.where(ok, idx, -1).astype(np.int32)[None]], 0)
+        # Retention order: highest NDVI, then earliest time, then earliest feed index (lexsort's last key is primary).
+        # Feed order therefore cannot decide which candidate survives an NDVI tie.
+        order = np.lexsort((idx_all, time_all, -ndvi_all), axis=0)
         ranked = np.take_along_axis(ndvi_all, order, axis=0)
         self.evicted_ndvi = np.maximum(self.evicted_ndvi, ranked[K])  # (K+1)-th ranked is dropped
         keep = order[:K]
         self.c_ndvi = ranked[:K]
         self.c_view = np.take_along_axis(
             np.concatenate([self.c_view, np.where(ok, view, np.nan).astype(np.float32)[None]], 0), keep, 0)
-        self.c_time = np.take_along_axis(
-            np.concatenate([self.c_time, np.where(ok, when, _NAT).astype(np.int64)[None]], 0), keep, 0)
-        self.c_idx = np.take_along_axis(
-            np.concatenate([self.c_idx, np.where(ok, idx, -1).astype(np.int32)[None]], 0), keep, 0)
+        self.c_time = np.take_along_axis(time_all, keep, 0)
+        self.c_idx = np.take_along_axis(idx_all, keep, 0)
         full_refl = np.concatenate([self.c_refl, refl[None]], 0)
         self.c_refl = np.take_along_axis(full_refl, np.broadcast_to(keep[..., None], (K,) + refl.shape), 0)
         full_geom = np.concatenate([self.c_geom, geom[None]], 0)
