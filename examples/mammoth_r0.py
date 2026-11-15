@@ -1,6 +1,6 @@
 """Build an HLS L30 R0 (snow-free background) over Mammoth Mountain from spires_io-materialised scenes.
 
-    python examples/mammoth_r0.py /data/spires/scenes/hls_l30 /data/spires/r0/mammoth_hlsl30_r0.nc
+    python examples/mammoth_r0.py scenes/hls_l30 mammoth_hlsl30_r0.nc
 """
 import logging
 import sys
