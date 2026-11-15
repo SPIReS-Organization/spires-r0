@@ -170,6 +170,9 @@ def build_raster_r0(
     result = _finalize_composite(composite)
     result.attrs = {**template.attrs, **result.attrs}
     result = result.rio.write_crs(template.rio.crs)
+    # The persisted-grid contract requires a GeoTransform on spatial_ref; derive it from the
+    # template's pixel-center coordinates so it is consistent with them by construction.
+    result = result.rio.write_transform(template.rio.transform(recalc=True))
     time_values = np.array(times, dtype="datetime64[ns]")
     params = {
         "max_sensor_zenith": policy.max_sensor_zenith,

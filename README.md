@@ -34,7 +34,7 @@ acquisition, and `r0_sensor_zenith/azimuth` are NaN), and raster-only candidate 
 (blue > 0.01, blue < green). Memory is ~(tiebreak_depth + 2) scenes regardless of stack length.
 
 - `build_modis_r0(...)`, `build_viirs_r0(...)`, `*_from_sources(...)`: unchanged signatures and
-  output schema; `*_from_sources` no longer materialises a time stack unless `zarr_path` is given.
+  output schema; `*_from_sources` streams scene by scene and never materialises a time stack.
 - `build_raster_r0(scene_dirs, sensor="hls_l30", r0_path=..., cache_root=...)`: Landsat/S2/HLS from
   `spires_io`-materialised scene directories. Grid = first scene in sorted-name order.
 - `R0Cache`: keyed on the product's `spires_r0_build_signature_sha256`; hits are re-validated and copied.
@@ -71,10 +71,38 @@ data = SpiresData(scene=scene, background=background)
 validate_for_inversion(data)
 ```
 
-## Optional execution features
+## In-memory execution
 
-Zarr-backed staging, Dask chunking, and progress bars are optional:
+`build_modis_r0(timeseries)` / `build_viirs_r0(timeseries)` take a caller-supplied
+summer stack for one tile; a lazy dataset is loaded once before selection, so
+allocate RAM for the full stack. `*_from_sources(...)` and `build_raster_r0(...)`
+stream instead and hold only ~(tiebreak_depth + 2) scenes at a time.
+
+Zarr staging and chunked R0 execution have been removed. The retired
+`zarr_path`, `zarr_mode` and `chunks` arguments raise `TypeError`, including when
+set to `None`. Remove these arguments from old callers; use `r0_path` for the
+atomic NetCDF product. Do not reinstate a disk-backed R0 execution mode.
+
+Progress bars remain optional:
 
 ```bash
-pip install "spires-r0[all]"
+pip install "spires-r0[progress]"
 ```
+
+## Georeferenced R0 grids
+
+Georeferenced inputs and products must use pixel-center `x`/`y` coordinates that
+agree with their scalar `spatial_ref` GeoTransform. R0 preparation, compositing,
+validation, and reuse now enforce that contract. The current MODIS/VIIRS reader
+derives centers from full-precision HDF-EOS tile bounds; do not round transform
+strings or reuse source edge coordinates as centers.
+
+For a legacy product whose scientific arrays are already on the correct tile,
+`spires_r0.repair_r0_grid_metadata(dataset, reference_grid)` provides an explicit
+metadata-only repair. Supply a reference grid independently parsed from its
+source product. The function requires matching dimensions, CRS, and recorded
+tile bounds, and accepts only canonical centers or the recognized legacy edge
+coordinate convention. It never resamples spectra or repairs arbitrary shifts.
+Back up the original file, verify unchanged scientific arrays, and replace it
+atomically after validation. Bare, unreferenced in-memory grids remain supported
+by the compositing API; they are not georeferenced operational products.

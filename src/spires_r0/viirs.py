@@ -135,12 +135,9 @@ def build_viirs_timeseries(
     show_progress: bool = False,
     progress_desc: str = "Preparing VIIRS scenes",
     keep_variables: tuple[str, ...] | list[str] | str | None = None,
-    zarr_path: str | Path | None = None,
-    zarr_mode: str = "w",
-    chunks: dict[str, int] | None = None,
     **prepare_kwargs,
 ) -> xr.Dataset:
-    """Prepare and concatenate VIIRS scenes into a time stack for R0 workflows."""
+    """Prepare and concatenate VIIRS scenes in memory into a time stack for R0 workflows."""
     prepare_kwargs.setdefault("keep_r0_masks", True)
     return build_shared_timeseries(
         sources,
@@ -149,9 +146,6 @@ def build_viirs_timeseries(
         show_progress=show_progress,
         progress_desc=progress_desc,
         keep_variables=keep_variables,
-        zarr_path=zarr_path,
-        zarr_mode=zarr_mode,
-        chunks=chunks,
         parse_filename_fn=parse_viirs_surface_reflectance_filename,
         prepare_scene_fn=prepare_viirs_scene_for_inversion,
         reduce_scene_for_r0_fn=reduce_viirs_prepared_scene_for_r0,
@@ -179,12 +173,9 @@ def build_viirs_r0_from_sources(
     ndsi_swir_band: str = VIIRS_R0_NDSI_SWIR_BAND,
     blue_band: str = VIIRS_R0_BLUE_BAND,
     min_blue_reflectance: float = 0.10,
-    zarr_path: str | Path | None = None,
-    zarr_mode: str = "w",
-    chunks: dict[str, int] | None = None,
     **prepare_kwargs,
 ) -> xr.Dataset:
-    """Build a VIIRS R0 composite from raw or prepared input scenes."""
+    """Build a VIIRS R0 composite from raw or prepared input scenes held in memory."""
     prepare_kwargs.setdefault("keep_r0_masks", True)
     return build_shared_r0_from_sources(
         sources,
@@ -196,9 +187,6 @@ def build_viirs_r0_from_sources(
         progress_desc=progress_desc,
         max_sensor_zenith=max_sensor_zenith,
         ndvi_tie_epsilon=ndvi_tie_epsilon,
-        zarr_path=zarr_path,
-        zarr_mode=zarr_mode,
-        chunks=chunks,
         ndvi_red_band=ndvi_red_band,
         ndvi_nir_band=ndvi_nir_band,
         ndsi_visible_band=ndsi_visible_band,

@@ -50,7 +50,7 @@ def build_mock_prepared_scene(
             "reflectance": reflectance,
             "sensor_zenith": xr.DataArray(zenith_values, dims=("y", "x"), coords={"y": [0], "x": [0, 1]}),
             "sensor_azimuth": xr.DataArray(azimuth_values, dims=("y", "x"), coords={"y": [0], "x": [0, 1]}),
-            "solar_zenith": xr.DataArray(solar_zenith_values, dims=("y", "x"), coords={"y": [0], "x": [0, 1]}),
+            "solar_zenith": xr.DataArray(solar_zenith_values, dims=("y", "x"), coords={"y": [0], "x": [0, 1]}, attrs={"units": "degrees"}),
             "solar_azimuth": xr.DataArray(solar_azimuth_values, dims=("y", "x"), coords={"y": [0], "x": [0, 1]}),
             "valid_r0_mask": xr.DataArray(np.array([[True, True]]), dims=("y", "x"), coords={"y": [0], "x": [0, 1]}),
             "mask_water": xr.DataArray(water_values, dims=("y", "x"), coords={"y": [0], "x": [0, 1]}),
@@ -223,7 +223,7 @@ def test_build_viirs_r0_from_sources_writes_and_reuses_existing_file(tmp_path):
     assert background.dtype == np.dtype(np.float32)
 
 
-def test_build_viirs_r0_accepts_chunked_timeseries(tmp_path):
+def test_build_viirs_r0_accepts_chunked_timeseries():
     da = pytest.importorskip("dask.array")
 
     scene_1 = build_mock_prepared_scene("2026-06-01", np.array([[0.2, 0.3, 0.1, 0.30, 0.5, 0.4, 0.4], [0.2, 0.6, 0.4, 0.40, 0.2, 0.3, 0.3]], dtype=np.float32))
@@ -236,12 +236,10 @@ def test_build_viirs_r0_accepts_chunked_timeseries(tmp_path):
         coords=timeseries["reflectance"].coords,
     )
 
-    staged = build_viirs_timeseries(
-        [chunked],
-        zarr_path=tmp_path / "prepared.zarr",
-        chunks={"time": 1},
-    )
-    r0 = build_viirs_r0(staged)
+    prepared = build_viirs_timeseries([chunked])
+    assert isinstance(prepared["reflectance"].data, np.ndarray)
+    r0 = build_viirs_r0(prepared)
+    assert isinstance(r0["r0_reflectance"].data, np.ndarray)
 
     assert r0["r0_source_index"].isel(y=0, x=0).compute().item() == 1
     assert r0["r0_source_index"].isel(y=0, x=1).compute().item() == 0

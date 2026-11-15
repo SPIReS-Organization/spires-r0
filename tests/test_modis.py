@@ -76,20 +76,24 @@ def _assert_r0_products_equal(a, b):
             np.testing.assert_array_equal(x, y, err_msg=v)
 
 
-def test_build_modis_r0_from_sources_streaming_equals_zarr_cube(tmp_path, rng):
+def _cube_r0(scenes):
+    """Oracle: materialise the full time stack and reduce it with the cube path."""
+    from spires_r0.modis import build_modis_r0, build_modis_timeseries
+
+    return build_modis_r0(build_modis_timeseries(scenes, keep_r0_masks=True))
+
+
+def test_build_modis_r0_from_sources_streaming_equals_cube(tmp_path, rng):
     from tests.conftest import random_stack
     from spires_r0.modis import build_modis_r0_from_sources
 
     scenes = random_stack(rng, n_time=4)
     streamed = build_modis_r0_from_sources(scenes, r0_path=tmp_path / "s.nc", overwrite=True)
-    cubed = build_modis_r0_from_sources(
-        scenes, r0_path=tmp_path / "c.nc", overwrite=True, zarr_path=tmp_path / "ts.zarr",
-    )
-    _assert_r0_products_equal(streamed, cubed)
+    _assert_r0_products_equal(streamed, _cube_r0(scenes))
     assert streamed.attrs["r0_source_scene_count"] == 4
 
 
-def test_build_modis_r0_from_sources_streaming_equals_zarr_cube_shuffled(tmp_path, rng):
+def test_build_modis_r0_from_sources_streaming_equals_cube_shuffled(tmp_path, rng):
     # The cube path sorts by time; the streaming path must remap its feed-order indices to the same order.
     from tests.conftest import random_stack
     from spires_r0.modis import build_modis_r0_from_sources
@@ -97,7 +101,4 @@ def test_build_modis_r0_from_sources_streaming_equals_zarr_cube_shuffled(tmp_pat
     scenes = random_stack(rng, n_time=5)
     shuffled = [scenes[i] for i in (3, 0, 4, 1, 2)]
     streamed = build_modis_r0_from_sources(shuffled, r0_path=tmp_path / "s.nc", overwrite=True)
-    cubed = build_modis_r0_from_sources(
-        shuffled, r0_path=tmp_path / "c.nc", overwrite=True, zarr_path=tmp_path / "ts.zarr",
-    )
-    _assert_r0_products_equal(streamed, cubed)
+    _assert_r0_products_equal(streamed, _cube_r0(shuffled))

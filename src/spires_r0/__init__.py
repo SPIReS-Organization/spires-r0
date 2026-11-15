@@ -8,6 +8,7 @@ except PackageNotFoundError:
     __version__ = "unknown"
 
 from spires_r0.core import validate_r0_dataset
+from spires_r0.grid import repair_r0_grid_metadata, validate_r0_grid
 from spires_r0.modis import (
     build_modis_r0,
     build_modis_r0_candidate_metrics,
@@ -54,4 +55,6 @@ __all__ = [
     "reduce_modis_prepared_scene_for_r0",
     "reduce_viirs_prepared_scene_for_r0",
     "validate_r0_dataset",
+    "validate_r0_grid",
+    "repair_r0_grid_metadata",
 ]

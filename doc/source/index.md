@@ -8,7 +8,7 @@ This package is part of the [SPIReS family](https://spires.readthedocs.io/).
 ## Implemented scope
 
 - Prepare explicit VIIRS and MODIS scene inventories through `spires-io`.
-- Build optional in-memory or Zarr-backed time stacks.
+- Build in-memory time stacks containing all summer scenes for one tile.
 - Select snow-free background spectra using the NDVI, NDSI,
   blue-reflectance, and view-geometry rules migrated from SpiPy.
 - Record source time/index, observation count, rule choice, and geometry.

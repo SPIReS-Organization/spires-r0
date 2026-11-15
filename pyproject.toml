@@ -17,16 +17,15 @@ dependencies = [
     "numpy",
     "xarray",
     "netCDF4",
+    "pyproj",
     "rioxarray",
 ]
 
 [project.optional-dependencies]
-zarr = ["zarr<3"]
-dask = ["dask"]
 tqdm = ["tqdm"]
 progress = ["tqdm"]
-all = ["zarr<3", "dask", "tqdm"]
-test = ["pytest", "zarr<3", "dask"]
+all = ["tqdm"]
+test = ["pytest", "dask"]
 
 [project.urls]
 Homepage = "https://github.com/SPIReS-Organization/spires-r0"

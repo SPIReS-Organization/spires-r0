@@ -135,12 +135,9 @@ def build_modis_timeseries(
     show_progress: bool = False,
     progress_desc: str = "Preparing MODIS scenes",
     keep_variables: tuple[str, ...] | list[str] | str | None = None,
-    zarr_path: str | Path | None = None,
-    zarr_mode: str = "w",
-    chunks: dict[str, int] | None = None,
     **prepare_kwargs,
 ) -> xr.Dataset:
-    """Prepare and concatenate MODIS scenes into a time stack for R0 workflows."""
+    """Prepare and concatenate MODIS scenes in memory into a time stack for R0 workflows."""
     prepare_kwargs.setdefault("keep_r0_masks", True)
     return build_shared_timeseries(
         sources,
@@ -149,9 +146,6 @@ def build_modis_timeseries(
         show_progress=show_progress,
         progress_desc=progress_desc,
         keep_variables=keep_variables,
-        zarr_path=zarr_path,
-        zarr_mode=zarr_mode,
-        chunks=chunks,
         parse_filename_fn=parse_modis_surface_reflectance_filename,
         prepare_scene_fn=prepare_modis_scene_for_inversion,
         reduce_scene_for_r0_fn=reduce_modis_prepared_scene_for_r0,
@@ -173,9 +167,6 @@ def build_modis_r0_from_sources(
     progress_desc: str = "Building MODIS R0",
     max_sensor_zenith: float = 30.0,
     ndvi_tie_epsilon: float = 0.02,
-    zarr_path: str | Path | None = None,
-    zarr_mode: str = "w",
-    chunks: dict[str, int] | None = None,
     ndvi_red_band: str = MODIS_R0_NDVI_RED_BAND,
     ndvi_nir_band: str = MODIS_R0_NDVI_NIR_BAND,
     ndsi_visible_band: str = MODIS_R0_NDSI_VISIBLE_BAND,
@@ -184,7 +175,7 @@ def build_modis_r0_from_sources(
     min_blue_reflectance: float = 0.10,
     **prepare_kwargs,
 ) -> xr.Dataset:
-    """Build a MODIS R0 composite from raw or prepared input scenes."""
+    """Build a MODIS R0 composite from raw or prepared input scenes held in memory."""
     prepare_kwargs.setdefault("keep_r0_masks", True)
     return build_shared_r0_from_sources(
         sources,
@@ -196,9 +187,6 @@ def build_modis_r0_from_sources(
         progress_desc=progress_desc,
         max_sensor_zenith=max_sensor_zenith,
         ndvi_tie_epsilon=ndvi_tie_epsilon,
-        zarr_path=zarr_path,
-        zarr_mode=zarr_mode,
-        chunks=chunks,
         ndvi_red_band=ndvi_red_band,
         ndvi_nir_band=ndvi_nir_band,
         ndsi_visible_band=ndsi_visible_band,

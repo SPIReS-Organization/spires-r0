@@ -21,12 +21,11 @@ from spires_io.logging_utils import log_event
 
 from spires_r0.fold import MODIS_POLICY, R0Composite, R0Policy, policy_from_legacy_kwargs
 from spires_r0.io import sanitize_netcdf_dataset
+from spires_r0.grid import validate_r0_grid
 from spires_r0.prefetch import one_ahead
 
 
 LOGGER = logging.getLogger(__name__)
-ZARR_SERIALIZATION_ATTRS = {"_FillValue", "missing_value", "add_offset", "scale_factor"}
-ZARR_WRITE_KWARGS = {"zarr_format": 2}
 R0_PRODUCT_TYPE = "SPIReS_R0"
 R0_SCHEMA_VERSION = 1
 R0_COMPLETION_STATUS = "complete"
@@ -206,17 +205,14 @@ def scalar_dataarray_to_value(value: xr.DataArray):
     return value.item()
 
 
-def sanitize_dataset_for_zarr_write(dataset: xr.Dataset) -> xr.Dataset:
-    """Drop serialization attrs that conflict with xarray zarr encoding."""
-    sanitized = dataset.copy()
-    sanitized.attrs = sanitized.attrs.copy()
-    for variable_name in sanitized.variables:
-        sanitized[variable_name].attrs = {
-            key: value
-            for key, value in sanitized[variable_name].attrs.items()
-            if key not in ZARR_SERIALIZATION_ATTRS
-        }
-    return sanitized
+def reject_removed_storage_options(prepare_kwargs: dict) -> None:
+    """Reject retired execution options before preparing scenes or reusing outputs."""
+    removed = {"zarr_path", "zarr_mode", "chunks"}.intersection(prepare_kwargs)
+    if removed:
+        raise TypeError(
+            "R0 construction is in-memory only; remove unsupported option(s): "
+            + ", ".join(sorted(removed))
+        )
 
 
 def sanitize_r0_dataset_attrs(dataset: xr.Dataset) -> xr.Dataset:
@@ -241,6 +237,8 @@ def validate_r0_dataset(
         raise TypeError(
             f"R0 product must be an xarray.Dataset, got {type(dataset).__name__}"
         )
+
+    validate_r0_grid(dataset)
 
     missing = [name for name in R0_REQUIRED_VARS if name not in dataset]
     if missing:
@@ -462,6 +460,7 @@ def reduce_prepared_scene_for_r0(
     sensor_display_name: str,
     copy_spatial_metadata_fn: CopySpatialMetadataFn,
 ) -> xr.Dataset:
+    validate_r0_grid(prepared_ds)
     missing = [name for name in staging_variables if name not in prepared_ds]
     if missing:
         raise ValueError(f"Prepared {sensor_display_name} scene is missing required R0 staging variables: {missing}")
@@ -647,6 +646,9 @@ def build_r0(
     """Reduce a time-stacked cube by folding its slices through R0Composite, one slice at a time."""
     if "time" not in prepared_timeseries.dims:
         raise ValueError("prepared_timeseries must have a 'time' dimension")
+    validate_r0_grid(prepared_timeseries)
+    # Materialize once before selection, including caller-supplied lazy datasets.
+    prepared_timeseries = prepared_timeseries.copy(deep=False).load()
     logger = logger or LOGGER
     params = {
         "max_sensor_zenith": max_sensor_zenith,
@@ -661,7 +663,7 @@ def build_r0(
     composite = None
     for t in range(int(prepared_timeseries.sizes["time"])):
         scene = prepared_timeseries.isel(time=t)
-        if hasattr(scene["reflectance"].data, "compute"):  # dask-backed (zarr) cube: materialise one slice
+        if hasattr(scene["reflectance"].data, "compute"):  # lazy (dask-backed) cube: materialise one slice
             scene = scene.compute()
         if composite is None:
             composite = R0Composite(scene, _legacy_r0_policy(params, event_name, tiebreak_depth))
@@ -712,9 +714,6 @@ def build_timeseries(
     show_progress: bool,
     progress_desc: str,
     keep_variables: tuple[str, ...] | list[str] | str | None,
-    zarr_path: str | Path | None,
-    zarr_mode: str,
-    chunks: dict[str, int] | None,
     parse_filename_fn: ParseFilenameFn,
     prepare_scene_fn: PrepareSceneFn,
     reduce_scene_for_r0_fn: Callable[[xr.Dataset], xr.Dataset],
@@ -723,14 +722,13 @@ def build_timeseries(
     summary_event_name: str,
     **prepare_kwargs,
 ) -> xr.Dataset:
+    reject_removed_storage_options(prepare_kwargs)
     prepared_scenes = []
     total_sources = len(sources)
     prepared_count = 0
     logger = logger or LOGGER
     iterator = sources
     requested_start_date, requested_end_date = infer_source_date_bounds(sources, parse_filename_fn=parse_filename_fn)
-    resolved_zarr_path = Path(zarr_path).expanduser().resolve() if zarr_path is not None else None
-    wrote_any_scene = False
 
     if show_progress:
         try:
@@ -821,44 +819,15 @@ def build_timeseries(
             raise ValueError("Prepared time-stack dataset contains no scenes")
         prepared_count += int(prepared.sizes["time"])
 
-        if chunks is not None:
-            normalized_chunks = {
-                dim: prepared.sizes[dim] if size == -1 else size
-                for dim, size in chunks.items()
-                if dim in prepared.dims
-            }
-            if normalized_chunks:
-                prepared = prepared.chunk(normalized_chunks)
+        prepared_scenes.append(prepared.copy(deep=False).load())
 
-        if resolved_zarr_path is not None:
-            prepared_for_write = sanitize_dataset_for_zarr_write(prepared)
-            if not wrote_any_scene:
-                resolved_zarr_path.parent.mkdir(parents=True, exist_ok=True)
-                prepared_for_write.to_zarr(resolved_zarr_path, mode=zarr_mode, **ZARR_WRITE_KWARGS)
-                wrote_any_scene = True
-            else:
-                prepared_for_write.to_zarr(
-                    resolved_zarr_path,
-                    mode="a",
-                    append_dim="time",
-                    **ZARR_WRITE_KWARGS,
-                )
-        else:
-            prepared_scenes.append(prepared)
-
-    if not prepared_scenes and resolved_zarr_path is None:
+    if not prepared_scenes:
         raise ValueError("At least one scene is required to build a timeseries")
 
-    if resolved_zarr_path is not None:
-        if not wrote_any_scene:
-            raise ValueError("At least one scene is required to build a timeseries")
-        timeseries = xr.open_zarr(resolved_zarr_path)
-    else:
-        timeseries = xr.concat(prepared_scenes, dim="time")
-        # The concatenated stack owns the data needed from the per-scene list.
-        # Drop the individual scene references before downstream metric building.
-        prepared_scenes.clear()
-        gc.collect()
+    timeseries = xr.concat(prepared_scenes, dim="time")
+    # Drop the per-scene references after assembling the in-memory summer stack.
+    prepared_scenes.clear()
+    gc.collect()
 
     if "time" in timeseries.coords:
         timeseries = timeseries.sortby("time")
@@ -877,7 +846,7 @@ def build_timeseries(
         output_shape=list(timeseries["reflectance"].shape) if "reflectance" in timeseries else None,
         scenes_requested=total_sources,
         scenes_prepared=prepared_count,
-        zarr_path=str(resolved_zarr_path) if resolved_zarr_path is not None else None,
+        execution_method="in_memory",
     )
     return timeseries
 
@@ -910,7 +879,7 @@ def _stream_r0_from_sources(
     Source handling mirrors build_timeseries: in-memory time stacks and prepared datasets are reused
     as-is, anything else goes through prepare_scene_fn, and a slice without a time dim gets its time
     from attrs['acquisition_date']. r0_source_index is emitted in time-sorted order (stable on ties),
-    the same indexing the zarr/cube path produces, by remapping the fold's feed-order indices.
+    the same indexing the cube path produces, by remapping the fold's feed-order indices.
     """
     if not sources:
         raise ValueError("At least one scene is required to build a timeseries")
@@ -1007,9 +976,6 @@ def build_r0_from_sources(
     progress_desc: str,
     max_sensor_zenith: float,
     ndvi_tie_epsilon: float,
-    zarr_path: str | Path | None,
-    zarr_mode: str,
-    chunks: dict[str, int] | None,
     ndvi_red_band: str,
     ndvi_nir_band: str,
     ndsi_visible_band: str,
@@ -1028,6 +994,7 @@ def build_r0_from_sources(
     timeseries_summary_event_name: str,
     **prepare_kwargs,
 ) -> xr.Dataset:
+    reject_removed_storage_options(prepare_kwargs)
     logger = logger or LOGGER
     resolved_r0_path = Path(r0_path).expanduser().resolve() if r0_path is not None else None
     sources = list(sources)
@@ -1107,64 +1074,28 @@ def build_r0_from_sources(
         r0_path=str(resolved_r0_path) if resolved_r0_path is not None else None,
     )
 
-    if zarr_path is not None:
-        timeseries = build_timeseries(
-            sources,
-            lut_file=lut_file,
-            logger=logger,
-            show_progress=show_progress,
-            progress_desc=progress_desc,
-            keep_variables="r0",
-            zarr_path=zarr_path,
-            zarr_mode=zarr_mode,
-            chunks=chunks,
-            parse_filename_fn=parse_filename_fn,
-            prepare_scene_fn=prepare_scene_fn,
-            reduce_scene_for_r0_fn=reduce_scene_for_r0_fn,
-            start_event_name=timeseries_start_event_name,
-            scene_event_name=timeseries_scene_event_name,
-            summary_event_name=timeseries_summary_event_name,
-            **prepare_kwargs,
-        )
-        result = build_r0(
-            timeseries,
-            logger=logger,
-            event_name=r0_build_event_name,
-            max_sensor_zenith=max_sensor_zenith,
-            ndvi_tie_epsilon=ndvi_tie_epsilon,
-            ndvi_red_band=ndvi_red_band,
-            ndvi_nir_band=ndvi_nir_band,
-            ndsi_visible_band=ndsi_visible_band,
-            ndsi_swir_band=ndsi_swir_band,
-            blue_band=blue_band,
-            min_blue_reflectance=min_blue_reflectance,
-            copy_spatial_metadata_fn=copy_spatial_metadata_fn,
-        )
-        # The product no longer depends on the zarr-backed stack once build_r0 has returned.
-        del timeseries
-    else:
-        result = _stream_r0_from_sources(
-            sources,
-            lut_file=lut_file,
-            logger=logger,
-            show_progress=show_progress,
-            progress_desc=progress_desc,
-            max_sensor_zenith=max_sensor_zenith,
-            ndvi_tie_epsilon=ndvi_tie_epsilon,
-            ndvi_red_band=ndvi_red_band,
-            ndvi_nir_band=ndvi_nir_band,
-            ndsi_visible_band=ndsi_visible_band,
-            ndsi_swir_band=ndsi_swir_band,
-            blue_band=blue_band,
-            min_blue_reflectance=min_blue_reflectance,
-            prepare_scene_fn=prepare_scene_fn,
-            reduce_scene_for_r0_fn=reduce_scene_for_r0_fn,
-            copy_spatial_metadata_fn=copy_spatial_metadata_fn,
-            event_name=r0_build_event_name,
-            prepare_kwargs=prepare_kwargs,
-            source_digest=requested_source_digest,
-            build_signature=requested_build_signature,
-        )
+    result = _stream_r0_from_sources(
+        sources,
+        lut_file=lut_file,
+        logger=logger,
+        show_progress=show_progress,
+        progress_desc=progress_desc,
+        max_sensor_zenith=max_sensor_zenith,
+        ndvi_tie_epsilon=ndvi_tie_epsilon,
+        ndvi_red_band=ndvi_red_band,
+        ndvi_nir_band=ndvi_nir_band,
+        ndsi_visible_band=ndsi_visible_band,
+        ndsi_swir_band=ndsi_swir_band,
+        blue_band=blue_band,
+        min_blue_reflectance=min_blue_reflectance,
+        prepare_scene_fn=prepare_scene_fn,
+        reduce_scene_for_r0_fn=reduce_scene_for_r0_fn,
+        copy_spatial_metadata_fn=copy_spatial_metadata_fn,
+        event_name=r0_build_event_name,
+        prepare_kwargs=prepare_kwargs,
+        source_digest=requested_source_digest,
+        build_signature=requested_build_signature,
+    )
     if requested_source_digest is not None:
         result.attrs[R0_SOURCE_INVENTORY_DIGEST_ATTR] = requested_source_digest
     if requested_build_signature is not None:
