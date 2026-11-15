@@ -1,0 +1,35 @@
+# Early warning for upstream spires-contract changes: tests floating main on a schedule so regular CI need not depend on a floating ref.
+# Scheduled/manual only and not a merge gate; a failure here means the pinned tag needs review.
+
+name: Contract canary
+
+on:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+jobs:
+  canary:
+    name: Contract canary on Python 3.12
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history for setuptools-scm
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install package + test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install ".[test]"
+
+      - name: Force-reinstall spires-contract from floating main
+        run: pip install --force-reinstall --no-deps "spires-contract @ git+https://github.com/SPIReS-Organization/spires-contract.git@main"
+
+      - name: Run tests
+        run: pytest -v
