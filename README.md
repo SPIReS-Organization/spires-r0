@@ -22,7 +22,7 @@ background spectra for the inversion boundary defined in
 
 The source builders accept prepared `xarray.Dataset` scenes or raw paths that
 `spires-io` can prepare, then select an annual snow-free background using the
-same NDVI/NDSI/blue-reflectance rules migrated from the original SpiPy workflow.
+same NDVI/NDSI/blue-reflectance rules carried over from the earlier MATLAB implementation.
 
 ## Scientific and file boundary
 
