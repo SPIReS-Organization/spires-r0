@@ -10,7 +10,8 @@ This package is part of the [SPIReS family](https://spires.readthedocs.io/).
 - Prepare explicit VIIRS and MODIS scene inventories through `spires-io`.
 - Build in-memory time stacks containing all summer scenes for one tile.
 - Select snow-free background spectra using the NDVI, NDSI,
-  blue-reflectance, and view-geometry rules migrated from SpiPy.
+  blue-reflectance, and view-geometry rules carried over from an earlier
+  implementation.
 - Record source time/index, observation count, rule choice, and geometry.
 - Validate and atomically write reusable NetCDF R0 artifacts.
 - Produce canonical float32 `(y, x, band)` background spectra that
