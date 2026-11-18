@@ -60,6 +60,30 @@ def _default_opener(sensor: str, platform: str | None, bands: list[str] | None) 
     return lambda d: adapter.open_surface_reflectance(d, **kwargs)
 
 
+_SPECS = {
+    "landsat": ("spires_io.landsat", "SPEC"),
+    "sentinel2": ("spires_io.sentinel2", "SPEC"),
+    "hls_l30": ("spires_io.hls", "L30_SPEC"),
+    "hls_s30": ("spires_io.hls", "S30_SPEC"),
+}
+
+
+def resolve_band_spec(sensor: str, bands: list[str] | None) -> dict[str, str]:
+    """Band name -> source file pattern the spires_io adapter will actually read.
+
+    `bands=None` means the adapter's full default list, which changes when spires_io changes
+    its SensorSpec; the resolved mapping, not the request, is what identifies a product.
+    """
+    import importlib
+
+    from spires_io.registry import normalize_sensor_name
+
+    module, attr = _SPECS[normalize_sensor_name(sensor)]
+    spec = getattr(importlib.import_module(module), attr)
+    names = list(bands) if bands is not None else list(spec.band_files)
+    return {b: spec.band_files[b] for b in names}
+
+
 def _align(scene: xr.Dataset, template: xr.Dataset, scene_id: str) -> xr.Dataset:
     """Reindex a scene onto the first scene's grid. Pixels with no counterpart become invalid.
 
@@ -124,18 +148,23 @@ def build_raster_r0(
         raise ValueError("no scene directories given")
     scene_ids = [d.name for d in dirs]
     inventory = source_inventory_digest(_inventory_sources(dirs))
+    band_spec = resolve_band_spec(sensor, bands)
     signature = build_request_digest(
         source_inventory_digest_value=inventory,
         lut_file=None,
         adapter=f"raster:{sensor}:{platform or ''}",
         algorithm_parameters={"policy": asdict(policy)},
-        prepare_kwargs={"bands": bands},
+        prepare_kwargs={"bands": bands, "band_spec": band_spec},
     )
 
     if not overwrite and r0_path.exists():
         existing = load_existing_r0_if_valid(
-            r0_path, expected_band_count=None, max_scene_index=None,
+            r0_path, expected_band_count=len(band_spec), max_scene_index=None,
             expected_source_inventory_digest=inventory, expected_build_signature=signature)
+        if existing is not None and list(existing["band"].values) != list(band_spec):
+            logger.info("R0 exists but its bands %s differ from the request %s, rebuilding",
+                        list(existing["band"].values), list(band_spec))
+            existing = None
         if existing is not None:
             logger.info("R0 exists and matches the request, reusing %s", r0_path)
             return existing

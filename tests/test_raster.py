@@ -4,7 +4,7 @@ import pytest
 import xarray as xr
 from spires_contract.spectra import validate_background_spectra
 
-from spires_r0.core import validate_r0_dataset
+from spires_r0.core import R0_BUILD_SIGNATURE_ATTR, validate_r0_dataset
 from spires_r0.raster import build_raster_r0, prepare_raster_scene_for_r0
 from tests.conftest import make_raster_scene
 
@@ -102,3 +102,29 @@ def test_existing_output_reused_unless_overwrite(tmp_path):
 def test_no_scenes_raises(tmp_path):
     with pytest.raises(ValueError, match="no scene"):
         build_raster_r0([], sensor="landsat", r0_path=tmp_path / "r0.nc", prefetch=False)
+
+
+def test_signature_tracks_resolved_band_spec(tmp_path):
+    # bands=None must resolve to the adapter's default band list, so a spec change in
+    # spires_io (or an explicit subset) cannot hit a product built for different bands.
+    dirs = _dirs(tmp_path, ["A"]); n = {"c": 0}
+    def opener(d): n["c"] += 1; return make_raster_scene(SNOWFREE)
+    p = tmp_path / "r0.nc"
+    ds = build_raster_r0(dirs, sensor="landsat", r0_path=p, open_scene=opener, prefetch=False)
+    sig_default = ds.attrs[R0_BUILD_SIGNATURE_ATTR]
+    ds2 = build_raster_r0(dirs, sensor="landsat", r0_path=p, open_scene=opener, prefetch=False,
+                          bands=["blue", "green", "red", "nir", "swir1"])
+    assert n["c"] == 2
+    assert ds2.attrs[R0_BUILD_SIGNATURE_ATTR] != sig_default
+
+
+def test_existing_output_with_wrong_bands_is_rebuilt(tmp_path):
+    dirs = _dirs(tmp_path, ["A"]); n = {"c": 0}
+    def opener(d): n["c"] += 1; return make_raster_scene(SNOWFREE)
+    p = tmp_path / "r0.nc"
+    build_raster_r0(dirs, sensor="landsat", r0_path=p, open_scene=opener, prefetch=False)
+    with xr.open_dataset(p) as ds:
+        stale = ds.isel(band=slice(0, 5)).load()
+    p.unlink(); stale.to_netcdf(p)
+    build_raster_r0(dirs, sensor="landsat", r0_path=p, open_scene=opener, prefetch=False)
+    assert n["c"] == 2
