@@ -186,3 +186,27 @@ def test_water_mask_dir_missing_tile_raises(tmp_path):
     with pytest.raises(FileNotFoundError, match="landWater2020_-120_030.tif"):
         build_raster_r0(dirs, sensor="landsat", r0_path=tmp_path / "r0.nc", water_mask_dir=empty,
                         open_scene=lambda d: make_raster_scene(SNOWFREE), prefetch=False)
+
+
+def test_water_mask_spanning_two_tiles_is_mosaicked(tmp_path):
+    # Grid straddles lon -120: columns west of it fall in tile -150_030, east in -120_030.
+    import pyproj
+    from spires_r0.watermask import water_mask_from_tiles
+
+    tile_dir = tmp_path / "watermask"; tile_dir.mkdir()
+    for west in (-150, -120):
+        lon = (west + 30 - 0.4) + 0.005 * (np.arange(80) + 0.5) if west == -150 else west + 0.005 * (np.arange(80) + 0.5)
+        lat = 38.2 - 0.005 * (np.arange(80) + 0.5)
+        data = np.full((80, 80), 1 if west == -150 else 0, np.uint8)  # west tile all land, east tile all water
+        xr.DataArray(data, dims=("y", "x"), coords={"y": lat, "x": lon}).rio.write_crs("EPSG:4326") \
+            .rio.to_raster(tile_dir / f"landWater2020_{west:04d}_030.tif")
+    to_utm = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:32611", always_xy=True)
+    x0, y0 = to_utm.transform(-120.0, 38.0)
+    x = x0 + 30.0 * (np.arange(-20, 20) + 0.5)
+    y = y0 - 30.0 * (np.arange(4) + 0.5)
+    template = xr.Dataset(coords={"y": y, "x": x}).rio.write_crs("EPSG:32611")
+    mask = water_mask_from_tiles(template, tile_dir)
+    assert mask.shape == (4, 40)
+    assert not mask.isel(x=slice(0, 18)).any()
+    assert mask.isel(x=slice(22, None)).all()
+    assert mask.attrs["tile"] == "landWater2020_-150_030.tif,landWater2020_-120_030.tif"
