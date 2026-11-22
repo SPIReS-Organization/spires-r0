@@ -13,7 +13,7 @@ license-files = ["LICENSE"]
 authors = [{ name = "Niklas Griessbaum" }]
 keywords = ["snow", "remote sensing", "xarray", "background reflectance"]
 dependencies = [
-    "spires-contract @ git+https://github.com/SPIReS-Organization/spires-contract.git@main",
+    "spires-contract @ git+https://github.com/SPIReS-Organization/spires-contract.git@v2.0.0",
     "spires-io @ git+https://github.com/SPIReS-Organization/spires-io.git@main",
     "numpy",
     "xarray",
