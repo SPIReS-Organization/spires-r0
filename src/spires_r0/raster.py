@@ -128,6 +128,7 @@ def build_raster_r0(
     platform: str | None = None,
     bands: list[str] | None = None,
     policy: R0Policy = RASTER_POLICY,
+    water_mask_dir: str | Path | None = None,
     cache_root: str | Path | None = None,
     overwrite: bool = False,
     open_scene: OpenScene | None = None,
@@ -140,9 +141,14 @@ def build_raster_r0(
     fold's tie-breaks are feed-order independent, the order only fixes the grid and the
     r0_source_index <-> r0_source_ids mapping. The build signature is computed before any scene
     is loaded so an existing product can be reused without touching the data.
+
+    `water_mask_dir` holds landWater2020 tiles (see spires_r0.watermask). Raster scenes carry no
+    water flag, so without it permanent water that is dark and NDSI-positive in every scene gets
+    no background and the inversion skips it; with it the fold's water-blue fallback applies.
     """
     logger = logger or log
     r0_path = Path(r0_path)
+    water_mask_dir = None if water_mask_dir is None else Path(water_mask_dir)
     dirs = sorted((Path(d) for d in scene_dirs), key=lambda p: p.name)
     if not dirs:
         raise ValueError("no scene directories given")
@@ -154,7 +160,8 @@ def build_raster_r0(
         lut_file=None,
         adapter=f"raster:{sensor}:{platform or ''}",
         algorithm_parameters={"policy": asdict(policy)},
-        prepare_kwargs={"bands": bands, "band_spec": band_spec},
+        prepare_kwargs={"bands": bands, "band_spec": band_spec,
+                        **({"water_mask": "landWater2020"} if water_mask_dir is not None else {})},
     )
 
     if not overwrite and r0_path.exists():
@@ -188,12 +195,22 @@ def build_raster_r0(
     composite: R0Composite | None = None
     template: xr.Dataset | None = None
     times: list[np.int64] = []
+    water: xr.DataArray | None = None
     for i, (d, scene) in enumerate(stream, start=1):
         if composite is None:
             template = scene
             composite = R0Composite(scene, policy)
+            if water_mask_dir is not None:
+                from spires_r0.watermask import water_mask_from_tiles
+
+                water = water_mask_from_tiles(template, water_mask_dir)
+                logger.info("water mask %s: %.2f%% of pixels are permanent water",
+                            water.attrs["tile"], 100 * float(water.values.mean()))
         times.append(_scene_time(scene))
-        frac = composite.update(_align(scene, template, d.name))
+        aligned = _align(scene, template, d.name)
+        if water is not None:
+            aligned["mask_water"] = water
+        frac = composite.update(aligned)
         logger.info("[%d/%d] %s: %.1f%% of pixels are snow-free candidates", i, len(dirs), d.name, 100 * frac)
 
     result = _finalize_composite(composite)
@@ -218,6 +235,7 @@ def build_raster_r0(
         "r0_sensor": sensor,
         "r0_platform": platform or "",
         "r0_source_ids": json.dumps(scene_ids),
+        "r0_water_mask_tile": "" if water is None else water.attrs["tile"],
         R0_SOURCE_INVENTORY_DIGEST_ATTR: inventory,
         R0_BUILD_SIGNATURE_ATTR: signature,
     })
