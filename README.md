@@ -35,8 +35,11 @@ acquisition, and `r0_sensor_zenith/azimuth` are NaN), and raster-only candidate 
 
 - `build_modis_r0(...)`, `build_viirs_r0(...)`, `*_from_sources(...)`: unchanged signatures and
   output schema; `*_from_sources` streams scene by scene and never materialises a time stack.
-- `build_raster_r0(scene_dirs, sensor="hls_l30", r0_path=..., cache_root=...)`: Landsat/S2/HLS from
-  `spires_io`-materialised scene directories. Grid = first scene in sorted-name order.
+- `build_raster_r0(scene_dirs, sensor="hls_l30", r0_path=..., water_mask_dir=..., cache_root=...)`:
+  Landsat/S2/HLS from `spires_io`-materialised scene directories. Grid = first scene in sorted-name
+  order. Raster scenes carry no water flag, so pass `water_mask_dir` (a directory of
+  `landWater2020_{lon}_{lat}.tif` tiles) or permanent water that is dark in every scene gets no
+  background and the inversion skips it.
 - `R0Cache`: keyed on the product's `spires_r0_build_signature_sha256`; hits are re-validated and copied.
 
 ## Scientific and file boundary
